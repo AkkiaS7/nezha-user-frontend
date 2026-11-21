@@ -1,0 +1,73 @@
+# selfhost 自用发版：只由 v<上游基线>-selfhost.<N> tag 触发，产物为 dist.zip。
+# 上游的 Build.yml 在本 fork 上已停用（它会被任何 v* tag 触发）。
+name: Selfhost release
+
+on:
+  push:
+    tags:
+      - "v*-selfhost.*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: selfhost-release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # 创建 release、上传 dist.zip
+    defaults:
+      run:
+        shell: bash
+    env:
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ github.ref_name }}
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Validate tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          [[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-selfhost\.[1-9][0-9]*$ ]] \
+            || { echo "Tag must look like v2.7.0-selfhost.1" >&2; exit 1; }
+          git fetch --no-tags origin selfhost
+          git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD \
+            || { echo "Tagged commit is not on selfhost" >&2; exit 1; }
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Release already exists; refusing to overwrite" >&2
+            exit 1
+          fi
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # 与上游发版一致：检查、测试、构建一次跑完。
+      - name: Verify static export
+        run: pnpm run verify
+
+      - name: Compress dist folder
+        run: zip -r dist.zip dist
+
+      # 正式版、设为 latest：面板的主题管理和构建脚本按 tag 取 dist.zip。
+      - name: Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$RELEASE_TAG" dist.zip --verify-tag --title "$RELEASE_TAG" \
+            --generate-notes --latest --prerelease=false
